@@ -1,2 +1,44 @@
-model/model_v6.cbm
-model/model_v6.zip
+# === Python Cache / Bytecode ===
+__pycache__/
+*.py[cod]
+*$py.class
+
+# === Virtual Environment ===
+venv/
+ENV/
+env/
+
+# === Model artifacts (학습 결과물) ===
+model/*.pkl
+model/*.pt
+model/*.json
+model/*.joblib
+model/*.h5
+
+# === Logs & Debug ===
+*.log
+
+# === IDE / Editor settings ===
+.vscode/
+.idea/
+*.swp
+
+# === OS-specific files ===
+.DS_Store
+Thumbs.db
+
+# === Environment variables & Secrets ===
+*.env
+.env.*
+*.pem
+
+# === Test / Coverage ===
+.pytest_cache/
+.coverage
+htmlcov/
+
+# === Build / Packaging ===
+*.egg-info/
+*.egg
+dist/
+build/
