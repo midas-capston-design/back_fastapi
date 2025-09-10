@@ -43,17 +43,18 @@ def health():
 def predict(data: schemas.SensorInput, db: Session = Depends(get_db)):
     """
     센서 데이터를 받아 위치를 예측하고, DB에서 해당 위치의 상세 정보를 함께 반환합니다.
+    항상 상위 3개의 예측 결과를 반환합니다.
     """
     if not MODEL_LOADED:
         return schemas.ModelOutput(
             prediction=-1, confidence=0.0, location_details=None,
-            top_k_results=["Error: Model components are not loaded."]
+            top_3_results=["Error: Model components are not loaded.", "", ""]
         )
     
     # 예측 로직 전체를 model_service의 함수 호출로 대체
     prediction_result, log_results, response_results = run_prediction(data)
     
-    # --- 이하 로깅 및 DB 조회, 응답 생성 로직은 기존과 동일 ---
+    # 로깅 처리
     input_str = (
         f"Input: Mag({data.Mag_X:.2f}, {data.Mag_Y:.2f}, {data.Mag_Z:.2f}), "
         f"Ori({data.Ori_X:.2f}, {data.Ori_Y:.2f}, {data.Ori_Z:.2f})"
@@ -65,9 +66,20 @@ def predict(data: schemas.SensorInput, db: Session = Depends(get_db)):
         results_str = f"Prediction: {prediction_result} (no confidence info)"
     logging.info(f"{input_str} -> {results_str}")
     
+    # 응답 데이터 구성
     confidence_score = log_results[0][1] if log_results else None
-    top_k_list = [f"{pred} ({conf:.4f})" for pred, conf in response_results] if data.top_k > 1 else None
     
+    # 무조건 3개의 결과를 문자열 리스트로 생성
+    top_3_list = []
+    if response_results and len(response_results) >= 3:
+        top_3_list = [f"{pred} ({conf:.4f})" for pred, conf in response_results[:3]]
+    else:
+        # 결과가 3개 미만인 경우 빈 문자열로 채움
+        top_3_list = [f"{pred} ({conf:.4f})" for pred, conf in response_results] if response_results else []
+        while len(top_3_list) < 3:
+            top_3_list.append("")
+    
+    # DB에서 위치 상세 정보 조회
     location_info_db = crud.get_predicted_location(db, location_id=prediction_result)
     location_details_schema = schemas.PredictedLocation.model_validate(location_info_db) if location_info_db else None
 
@@ -75,7 +87,7 @@ def predict(data: schemas.SensorInput, db: Session = Depends(get_db)):
         prediction=prediction_result,
         confidence=confidence_score,
         location_details=location_details_schema,
-        top_k_results=top_k_list
+        top_3_results=top_3_list
     )
 
 @app.get("/", summary="API 정보")

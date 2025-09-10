@@ -106,12 +106,11 @@ class SensorInput(BaseModel):
     """/predict API에 입력되는 센서 데이터의 형식을 정의하는 스키마"""
     Mag_X: float; Mag_Y: float; Mag_Z: float # 자기장 센서 값
     Ori_X: float; Ori_Y: float; Ori_Z: float # 방위각 센서 값
-    top_k: Optional[int] = 1 # 상위 K개의 예측 결과를 요청 (기본값 1)
+    # top_k: Optional[int] = 1 # 이 줄 삭제
 
 class ModelOutput(BaseModel):
     """/predict API가 반환하는 최종 예측 결과의 형식을 정의하는 스키마"""
     prediction: int # 최종 예측된 위치 ID
     confidence: Optional[float] = None # 예측에 대한 신뢰도 점수 (0.0 ~ 1.0)
     location_details: Optional[PredictedLocation] = None # 예측된 위치의 상세 정보 (DB에서 조회)
-    top_k_results: Optional[List[str]] = None # Top-K 예측 결과 목록
-
+    top_3_results: List[str] # Top-3 예측 결과 목록 (항상 3개)
