@@ -113,4 +113,4 @@ class ModelOutput(BaseModel):
     prediction: int # 최종 예측된 위치 ID
     confidence: Optional[float] = None # 예측에 대한 신뢰도 점수 (0.0 ~ 1.0)
     location_details: Optional[PredictedLocation] = None # 예측된 위치의 상세 정보 (DB에서 조회)
-    top_3_results: List[str] # Top-3 예측 결과 목록 (항상 3개)
+    top_k_results: List[str] # Top-3 예측 결과 목록 (항상 3개)
