@@ -70,14 +70,14 @@ def predict(data: schemas.SensorInput, db: Session = Depends(get_db)):
     confidence_score = log_results[0][1] if log_results else None
     
     # 무조건 3개의 결과를 문자열 리스트로 생성
-    top_3_list = []
+    top_k_list = []
     if response_results and len(response_results) >= 3:
-        top_3_list = [f"{pred} ({conf:.4f})" for pred, conf in response_results[:3]]
+        top_k_list = [f"{pred} ({conf:.4f})" for pred, conf in response_results[:3]]
     else:
         # 결과가 3개 미만인 경우 빈 문자열로 채움
-        top_3_list = [f"{pred} ({conf:.4f})" for pred, conf in response_results] if response_results else []
-        while len(top_3_list) < 3:
-            top_3_list.append("")
+        top_k_list = [f"{pred} ({conf:.4f})" for pred, conf in response_results] if response_results else []
+        while len(top_k_list) < 3:
+            top_k_list.append("")
     
     # DB에서 위치 상세 정보 조회
     location_info_db = crud.get_predicted_location(db, location_id=prediction_result)
