@@ -9,7 +9,6 @@ ENV/
 env/
 
 # === Model artifacts (학습 결과물) ===
-model/
 
 # === Logs & Debug ===
 *.log
