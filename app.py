@@ -1,361 +1,144 @@
 # -*- coding: utf-8 -*-
 """
-FastAPI 서버: 위치 기반 자기장 보정 + PyTorch MLP 위치 예측 + 사용자 관리 + 예측 위치 정보
-필요 파일:
-  - mlp_position.pt
-  - label_encoder.pkl
-  - scaler.pkl
-  - calibration_params.json
+FastAPI 서버: Scikit-learn Pipeline 위치 예측 + 사용자 관리 + 예측 위치 정보 (v5.0)
+- 새로운 6-Input MLP 모델 및 다단계 보정 파이프라인 적용
 """
-
-import json
+import os
 import joblib
 import numpy as np
-import torch
-import torch.nn as nn
 from fastapi import FastAPI, Depends
 from sqlalchemy.orm import Session
-from pydantic import BaseModel
-from scipy.spatial.distance import euclidean
-from typing import Dict, List, Optional
+from typing import List
 
-# --- 라우터 및 DB import ---
-from database import Base, engine
-from user_router import router as user_router, get_db
+# --- 라우터, DB, 스키마, CRUD 함수 import ---
+from database import engine, Base, get_db
+from user_router import router as user_router
 from favorites_router import router as favorites_router
-from locations_router import router as locations_router # 새로 만든 라우터 import
+from locations_router import router as locations_router
+import crud
+import schemas
 
-import crud # crud 모듈 import
-import schemas # schemas 모듈 import
-
-# Create database tables on startup
+# 서버 시작 시 데이터베이스 테이블 생성
 Base.metadata.create_all(bind=engine)
-# ----------------------------------
 
-# -------------------------------
-# 설정
-# -------------------------------
-MODEL_PTH = "model/mlp_position.pt"
-LE_PKL = "model/label_encoder.pkl"
-SCALER_PKL = "model/scaler.pkl"
-CALIB_JSON = "model/calibration_params.json"
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+# 🔽 [수정] 새로운 모델 5개 로드 ---
+# ------------------------------------
+base_dir = os.path.dirname(__file__)
+model_dir = os.path.join(base_dir, "model")
 
-# -------------------------------
-# 데이터 입력 스키마
-# -------------------------------
-class SensorInput(BaseModel):
-    Mag_X: float
-    Mag_Y: float
-    Mag_Z: float
-    Ori_X: float  # Azimuth
-    Ori_Y: float  # Pitch
-    Ori_Z: float  # Roll
+# 모델 파일 경로 정의
+MODEL_PATHS = {
+    "mlp": os.path.join(model_dir, "mlp_model_6input.pkl"),
+    "scaler": os.path.join(model_dir, "scaler.pkl"),
+    "zero_center": os.path.join(model_dir, "zero_center_means.pkl"),
+    "soft_iron": os.path.join(model_dir, "soft_iron_matrix.pkl"),
+    "hard_iron": os.path.join(model_dir, "bias.pkl")
+}
 
-# ModelOutput 스키마 수정
-class ModelOutput(BaseModel):
-    prediction: int
-    confidence: float
-    calibration_info: dict
-    location_details: Optional[schemas.PredictedLocation] = None # 예측 위치 정보 필드 추가
+# 모델 컴포넌트들을 담을 딕셔너리
+models = {}
+try:
+    for name, path in MODEL_PATHS.items():
+        models[name] = joblib.load(path)
+        print(f"✅ 모델 컴포넌트 로드 완료: {os.path.basename(path)}")
+    MODEL_LOADED = True
+    # 학습 코드에 명시된 6개의 피처
+    FEATURE_COLS = ['Mag_X', 'Mag_Y', 'Mag_Z', 'Ori_X', 'Ori_Y', 'Ori_Z']
+    print("🚀 모든 모델 컴포넌트가 성공적으로 로드되었습니다.")
+except (FileNotFoundError, KeyError) as e:
+    print(f"❌ 모델 로드 실패: {e}")
+    MODEL_LOADED = False
+# ------------------------------------
 
-# -------------------------------
-# 모델 정의 (학습 코드와 동일해야 함)
-# -------------------------------
-class MLP(nn.Module):
-    def __init__(self, input_dim, hidden_sizes, output_dim, dropout=0.3):
-        super().__init__()
-        layers = []
-        prev_dim = input_dim
-        for h in hidden_sizes:
-            layers.append(nn.Linear(prev_dim, h))
-            layers.append(nn.BatchNorm1d(h))
-            layers.append(nn.ReLU())
-            layers.append(nn.Dropout(dropout))
-            prev_dim = h
-        layers.append(nn.Linear(prev_dim, output_dim))
-        self.net = nn.Sequential(*layers)
-
-    def forward(self, x):
-        return self.net(x)
-
-# -------------------------------
-# 위치 기반 캘리브레이션 매니저
-# -------------------------------
-class LocationBasedCalibrationManager:
-    def __init__(self, calib_params: Dict):
-        self.calib_params = calib_params
-        self.best_quality_point = self._find_best_quality_point()
-        
-    def _find_best_quality_point(self) -> str:
-        """최고 품질 캘리브레이션 포인트 (백업용)"""
-        best_quality = 0
-        best_key = "1"
-        
-        for key, params in self.calib_params.items():
-            if params["calibration_quality"] > best_quality:
-                best_quality = params["calibration_quality"]
-                best_key = key
-        
-        return best_key
+# 🔽 [수정] 새로운 예측 파이프라인 Helper 함수 ---
+def _run_new_prediction_pipeline(payload: schemas.SensorInput, top_k: int = 1):
+    """새로운 모델의 다단계 보정 및 예측 파이프라인을 수행합니다."""
     
-    def find_best_matching_location(self, mag_raw: List[float]) -> str:
-        """현재 센서 상태와 가장 유사한 위치 찾기"""
-        best_score = float('-inf')
-        best_location = self.best_quality_point
-        mag_array = np.array(mag_raw)
-        
-        for point_id, params in self.calib_params.items():
-            score = self._calculate_location_score(mag_array, params, point_id)
-            if score > best_score:
-                best_score = score
-                best_location = point_id
-                
-        return best_location
+    # 1. 입력 데이터를 NumPy 배열로 변환
+    mag_data = np.array([[payload.Mag_X, payload.Mag_Y, payload.Mag_Z]])
+    ori_data = np.array([[payload.Ori_X, payload.Ori_Y, payload.Ori_Z]])
+
+    # 2. 자기장 센서 데이터 보정 (Calibration)
+    #    - Zero-centering -> Soft-iron correction -> Hard-iron correction
+    mag_centered = mag_data - models["zero_center"]
+    mag_soft_corrected = np.dot(mag_centered, models["soft_iron"])
+    mag_calibrated = mag_soft_corrected - models["hard_iron"]
+
+    # 3. 최종 피처 벡터 생성 (보정된 Mag 3축 + Ori 3축)
+    feature_vector = np.concatenate((mag_calibrated, ori_data), axis=1)
+
+    # 4. 데이터 스케일링 (StandardScaler)
+    scaled_features = models["scaler"].transform(feature_vector)
+
+    # 5. MLP 모델로 예측 수행
+    mlp_model = models["mlp"]
+    prediction = int(mlp_model.predict(scaled_features)[0])
     
-    def _calculate_location_score(self, mag_raw: np.ndarray, params: Dict, point_id: str) -> float:
-        """위치별 점수 계산"""
-        score = 0
-        quality_score = params["calibration_quality"] * 0.3
-        score += quality_score
-        
-        bias = np.array(params["hard_iron_bias"])
-        matrix = np.array(params["soft_iron_matrix"])
-        
-        try:
-            corrected = mag_raw - bias
-            calibrated = matrix @ corrected
-            calibrated_magnitude = np.linalg.norm(calibrated)
-            
-            if 20 <= calibrated_magnitude <= 80:
-                magnitude_error = abs(calibrated_magnitude - 45) / 25
-                magnitude_score = max(0, 1.0 - magnitude_error) * 0.4
-                score += magnitude_score
-            else:
-                score -= 0.2
-                
-        except Exception:
-            score -= 0.3
-        
-        try:
-            bias_distance = euclidean(mag_raw, bias)
-            max_distance = 20.0
-            similarity = max(0, 1.0 - bias_distance / max_distance)
-            similarity_score = similarity * 0.3
-            score += similarity_score
-            
-        except Exception:
-            score -= 0.1
-        
-        return score
-    
-    def apply_location_based_calibration(self, mag_raw: List[float]) -> Dict:
-        """위치 기반 적응형 캘리브레이션 적용"""
-        best_location = self.find_best_matching_location(mag_raw)
-        params = self.calib_params[best_location]
-        bias = np.array(params["hard_iron_bias"])
-        matrix = np.array(params["soft_iron_matrix"])
-        
-        try:
-            corrected = np.array(mag_raw) - bias
-            calibrated = matrix @ corrected
-            calibrated_magnitude = np.linalg.norm(calibrated)
-            is_reasonable = 15 <= calibrated_magnitude <= 100
-            
-            if not is_reasonable:
-                raise ValueError(f"unreasonable_magnitude_{calibrated_magnitude:.2f}")
-            
-            return {
-                "calibrated_mag": calibrated.tolist(),
-                "method": "location_based",
-                "selected_location": best_location,
-                "calibrated_magnitude": float(calibrated_magnitude),
-                "quality": params["calibration_quality"],
-                "is_fallback": False
-            }
-            
-        except Exception as e:
-            fallback_params = self.calib_params[self.best_quality_point]
-            fallback_bias = np.array(fallback_params["hard_iron_bias"])
-            fallback_matrix = np.array(fallback_params["soft_iron_matrix"])
-            
-            fallback_corrected = np.array(mag_raw) - fallback_bias
-            fallback_calibrated = fallback_matrix @ fallback_corrected
-            
-            return {
-                "calibrated_mag": fallback_calibrated.tolist(),
-                "method": "location_based_with_fallback",
-                "selected_location": best_location,
-                "fallback_location": self.best_quality_point,
-                "calibrated_magnitude": float(np.linalg.norm(fallback_calibrated)),
-                "quality": fallback_params["calibration_quality"],
-                "is_fallback": True,
-                "fallback_reason": str(e)
-            }
+    # 6. 신뢰도(Confidence) 및 Top-K 결과 계산
+    confidence, top_k_list = None, None
+    if hasattr(mlp_model, "predict_proba"):
+        probabilities = mlp_model.predict_proba(scaled_features)
+        confidence = float(np.max(probabilities))
+        if top_k > 1:
+            idx_sorted = np.argsort(-probabilities, axis=1)[:, :top_k]
+            # label_encoder가 없으므로 정수 인덱스를 그대로 사용합니다.
+            top_k_list = [f"{int(cls)} ({probabilities[0, cls]:.4f})" for cls in idx_sorted[0]]
 
-# -------------------------------
-# 캘리브레이션 파라미터 및 매니저 초기화
-# -------------------------------
-with open(CALIB_JSON, "r", encoding="utf-8") as f:
-    calib_params = json.load(f)
+    return prediction, confidence, top_k_list
+# ----------------------------------------------------
 
-calib_manager = LocationBasedCalibrationManager(calib_params)
-
-# -------------------------------
-# 전처리 함수 (특징 생성)
-# -------------------------------
-def build_features(mag, ori):
-    B = np.array(mag, dtype=float).reshape(1, -1)
-    B_mag = np.linalg.norm(B, axis=1, keepdims=True)
-    B_xy = np.linalg.norm(B[:, :2], axis=1, keepdims=True)
-    eps = 1e-9
-    B_unit = B / (B_mag + eps)
-
-    feat = {}
-    feat["B_x"], feat["B_y"], feat["B_z"] = B[0]
-    feat["B_mag"] = B_mag[0, 0]
-    feat["B_xy_mag"] = B_xy[0, 0]
-    feat["Bux"], feat["Buy"], feat["Buz"] = B_unit[0]
-
-    for i, a in enumerate(["Ori_X", "Ori_Y", "Ori_Z"]):
-        rad = np.deg2rad(ori[i])
-        feat[f"{a}_sin"] = np.sin(rad)
-        feat[f"{a}_cos"] = np.cos(rad)
-
-    return np.array(list(feat.values()), dtype=float).reshape(1, -1)
-
-# -------------------------------
-# 모델, 인코더, 스케일러 로드
-# -------------------------------
-le = joblib.load(LE_PKL)
-scaler = joblib.load(SCALER_PKL)
-
-input_dim = len(scaler.mean_)
-output_dim = len(le.classes_)
-
-model = MLP(input_dim, [2048, 1024, 512], output_dim).to(DEVICE)
-model.load_state_dict(torch.load(MODEL_PTH, map_location=DEVICE))
-model.eval()
-
-# -------------------------------
-# FastAPI 앱
-# -------------------------------
-app = FastAPI(title="Location-based Magnetometer Calibration + MLP Inference + User Management")
-
-# --- 라우터 등록 ---
+# --- FastAPI 앱 초기화 및 라우터 등록 ---
+app = FastAPI(
+    title="Midas API - 실내 위치 예측 및 사용자 서비스 (6-Input MLP)",
+    description="새로운 6-Input MLP 모델과 자기장 보정 파이프라인이 적용된 API 서버입니다.",
+    version="5.0.0",
+)
 app.include_router(user_router, prefix="/users", tags=["users"])
 app.include_router(favorites_router, prefix="/favorites", tags=["favorites"])
-app.include_router(locations_router, prefix="/locations", tags=["Predicted Locations"]) # 새로 만든 라우터 등록
+app.include_router(locations_router, prefix="/locations", tags=["Predicted Locations"])
 
-# ------------------------------
+# --- API Endpoints ---
+@app.get("/health", summary="서버 상태 확인")
+def health():
+    return {
+        "status": "ok" if MODEL_LOADED else "error",
+        "model_loaded": MODEL_LOADED,
+        "model_name": "MLPClassifier (6-Input with Calibration)",
+        "feature_cols": FEATURE_COLS if MODEL_LOADED else None,
+    }
 
-@app.post("/predict", response_model=ModelOutput)
-def predict(data: SensorInput, db: Session = Depends(get_db)): # db 세션 의존성 추가
-    """위치 기반 적응형 캘리브레이션을 사용한 위치 예측 및 상세 정보 반환"""
+@app.post("/predict", response_model=schemas.ModelOutput, summary="센서 데이터로 위치 예측")
+def predict(data: schemas.SensorInput, db: Session = Depends(get_db)):
+    if not MODEL_LOADED:
+        return schemas.ModelOutput(
+            prediction=-1, confidence=0.0, location_details=None,
+            top_k_results=["Error: Model components are not loaded."]
+        )
     
-    # 1. 위치 기반 자기장 보정
-    mag_raw = [data.Mag_X, data.Mag_Y, data.Mag_Z]
-    calib_result = calib_manager.apply_location_based_calibration(mag_raw)
-    mag_calibrated = calib_result["calibrated_mag"]
+    # 1. [수정] 새로운 예측 파이프라인 실행
+    prediction_result, confidence_score, top_k_list = _run_new_prediction_pipeline(data, top_k=data.top_k)
+    
+    # 2. DB에서 위치 정보 조회 (기존과 동일)
+    location_info_db = crud.get_predicted_location(db, location_id=prediction_result)
+    
+    location_details_schema = None
+    if location_info_db:
+        location_details_schema = schemas.PredictedLocation.model_validate(location_info_db)
 
-    # 2. 특징 생성
-    ori_raw = [data.Ori_X, data.Ori_Y, data.Ori_Z]
-    feat = build_features(mag_calibrated, ori_raw)
-
-    # 3. 표준화
-    feat_std = scaler.transform(feat)
-
-    # 4. 모델 추론
-    with torch.no_grad():
-        x = torch.tensor(feat_std, dtype=torch.float32).to(DEVICE)
-        logits = model(x)
-        probs = torch.softmax(logits, dim=1).cpu().numpy()[0]
-
-    pred_idx = int(np.argmax(probs))
-    confidence = float(probs[pred_idx])
-
-    # 5. 예측된 인덱스(ID)로 DB에서 위치 정보 조회 (새로 추가된 로직)
-    location_info = crud.get_predicted_location(db, location_id=pred_idx)
-
-    # 6. 최종 응답에 위치 정보 포함하여 반환 (수정된 로직)
-    return ModelOutput(
-        prediction=pred_idx, 
-        confidence=confidence,
-        calibration_info=calib_result,
-        location_details=location_info # 위치 정보 추가
+    # 3. 최종 응답 생성 (기존과 동일)
+    return schemas.ModelOutput(
+        prediction=prediction_result,
+        confidence=confidence_score,
+        location_details=location_details_schema,
+        top_k_results=top_k_list
     )
 
-# --- 추가된 캘리브레이션 관련 엔드포인트 ---
-
-@app.get("/calibration/stats")
-def get_calibration_stats():
-    """캘리브레이션 통계 정보 제공"""
-    qualities = [params["calibration_quality"] for params in calib_params.values()]
-    
-    return {
-        "total_locations": len(calib_params),
-        "quality_stats": {
-            "mean": float(np.mean(qualities)),
-            "std": float(np.std(qualities)),
-            "min": float(np.min(qualities)),
-            "max": float(np.max(qualities))
-        },
-        "best_quality_location": calib_manager.best_quality_point,
-        "best_quality_value": calib_params[calib_manager.best_quality_point]["calibration_quality"]
-    }
-
-@app.post("/calibration/test")
-def test_calibration_selection(data: SensorInput):
-    """특정 센서 데이터에 대한 캘리브레이션 선택 과정 상세 정보"""
-    mag_raw = [data.Mag_X, data.Mag_Y, data.Mag_Z]
-    scores = {}
-    mag_array = np.array(mag_raw)
-    
-    for point_id, params in calib_params.items():
-        score = calib_manager._calculate_location_score(mag_array, params, point_id)
-        scores[point_id] = {
-            "score": float(score),
-            "quality": params["calibration_quality"]
-        }
-    
-    best_location = max(scores.keys(), key=lambda k: scores[k]["score"])
-    calib_result = calib_manager.apply_location_based_calibration(mag_raw)
-    
-    return {
-        "input_magnetometer": mag_raw,
-        "all_location_scores": scores,
-        "selected_location": best_location,
-        "calibration_result": calib_result,
-        "selection_reasoning": {
-            "total_locations_evaluated": len(scores),
-            "score_range": {
-                "min": min(s["score"] for s in scores.values()),
-                "max": max(s["score"] for s in scores.values())
-            }
-        }
-    }
-
-@app.get("/")
+@app.get("/", summary="API 정보")
 def root():
     return {
-        "message": "Location-based Magnetometer Calibration API with User Management",
-        "version": "2.1",
-        "features": [
-            "29개 위치별 적응형 캘리브레이션",
-            "실시간 최적 위치 선택",
-            "백업 캘리브레이션 시스템", 
-            "MLP 기반 위치 예측",
-            "예측 위치 상세 정보 반환",
-            "사용자 관리 시스템 (회원가입, 로그인)",
-            "즐겨찾기 관리 시스템 (추가, 조회, 삭제)",
-            "예측 위치 정보 관리 시스템"
-        ],
-        "endpoints": {
-            "prediction": "/predict",
-            "user_management": "/users/*",
-            "favorites_management": "/favorites/*",
-            "locations_management": "/locations/*",
-            "calibration_stats": "/calibration/stats",
-            "calibration_test": "/calibration/test"
-        }
+        "message": "Full-featured Sensor Prediction API with User Management",
+        "version": "5.0.0",
+        "model_type": "6-Input MLPClassifier with Calibration Pipeline",
+        # (기능 설명은 기존과 동일)
     }
+
