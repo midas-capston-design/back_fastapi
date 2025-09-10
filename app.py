@@ -48,7 +48,7 @@ def predict(data: schemas.SensorInput, db: Session = Depends(get_db)):
     if not MODEL_LOADED:
         return schemas.ModelOutput(
             prediction=-1, confidence=0.0, location_details=None,
-            top_3_results=["Error: Model components are not loaded.", "", ""]
+            top_k_results=["Error: Model components are not loaded.", "", ""]
         )
     
     # 예측 로직 전체를 model_service의 함수 호출로 대체
