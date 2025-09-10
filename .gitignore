@@ -1,19 +1,15 @@
 # === Python Cache / Bytecode ===
-./__pycache__/
+__pycache__/
 *.py[cod]
 *$py.class
-
+ㅣ
 # === Virtual Environment ===
 venv/
 ENV/
 env/
 
 # === Model artifacts (학습 결과물) ===
-model/*.pkl
-model/*.pt
-model/*.json
-model/*.joblib
-model/*.h5
+model/
 
 # === Logs & Debug ===
 *.log
