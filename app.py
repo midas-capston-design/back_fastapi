@@ -87,7 +87,7 @@ def predict(data: schemas.SensorInput, db: Session = Depends(get_db)):
         prediction=prediction_result,
         confidence=confidence_score,
         location_details=location_details_schema,
-        top_3_results=top_3_list
+        top_k_results=top_k_list
     )
 
 @app.get("/", summary="API 정보")
