@@ -14,8 +14,10 @@ import schemas
 base_dir = os.path.dirname(__file__)
 model_dir = os.path.join(base_dir, "model")
 
+# (수정) 6-input 개별 모델을 로드하도록 경로 변경
 MODEL_PATHS = {
-    "pipeline": os.path.join(model_dir, "mlp_pipeline_6input_magabs.pkl"),
+    "mlp": os.path.join(model_dir, "mlp_model_6input.pkl"),
+    "scaler": os.path.join(model_dir, "scaler.pkl"), # Scaler를 다시 별도로 로드
     "label_encoder": os.path.join(model_dir, "label_encoder_6input.pkl"),
     "zero_center": os.path.join(model_dir, "zero_center_means.pkl"),
     "soft_iron": os.path.join(model_dir, "soft_iron_matrix.pkl"),
@@ -30,8 +32,9 @@ try:
         models[name] = joblib.load(path)
         print(f"✅ 모델 컴포넌트 로드 완료: {os.path.basename(path)}")
     MODEL_LOADED = True
-    FEATURE_COLS = ['Mag_X', 'Mag_Y', 'Mag_Z', 'Ori_X', 'Ori_Y', 'Ori_Z', 'Mag_abs']
-    print("🚀 모든 모델 컴포넌트(7-input Pipeline)가 성공적으로 로드되었습니다.")
+    # (수정) 특징 컬럼에서 'Mag_abs' 제거
+    FEATURE_COLS = ['Mag_X', 'Mag_Y', 'Mag_Z', 'Ori_X', 'Ori_Y', 'Ori_Z']
+    print("🚀 모든 모델 컴포넌트(6-input)가 성공적으로 로드되었습니다.")
 except (FileNotFoundError, KeyError) as e:
     print(f"❌ 모델 로드 실패: {e}")
 
@@ -42,7 +45,7 @@ def get_model_status() -> dict:
     return {
         "status": "ok" if MODEL_LOADED else "error",
         "model_loaded": MODEL_LOADED,
-        "model_name": "MLP 7-input Pipeline (with Full Calibration)",
+        "model_name": "MLP 6-input (with Full Calibration)", # (수정) 모델 이름 변경
         "feature_cols": FEATURE_COLS if MODEL_LOADED else None,
     }
 
@@ -58,19 +61,17 @@ def extract_location_id(label_str):
 
 def run_prediction(data: schemas.SensorInput) -> Tuple[int, list, list]:
     """
-    (수정) Mag_abs를 보정 전에 먼저 계산하도록 로직 순서 변경
+    (수정) 6-input 모델에 맞게 수동 전처리 및 예측을 수행합니다.
     """
     if not MODEL_LOADED:
         raise RuntimeError("Model components are not loaded properly.")
 
     # 1. 입력 데이터를 Pandas DataFrame으로 변환
-    initial_feature_cols = ['Mag_X', 'Mag_Y', 'Mag_Z', 'Ori_X', 'Ori_Y', 'Ori_Z']
-    feature_df = pd.DataFrame([data.model_dump()], columns=initial_feature_cols)
+    feature_df = pd.DataFrame([data.model_dump()], columns=FEATURE_COLS)
 
-    # (수정 ✨) 2. 자기장 크기(Mag_abs)를 "보정 전" 원본 값으로 먼저 계산
-    feature_df['Mag_abs'] = np.sqrt(feature_df['Mag_X']**2 + feature_df['Mag_Y']**2 + feature_df['Mag_Z']**2)
+    # (삭제) 2. 자기장 크기(Mag_abs) 계산 로직 제거
 
-    # 3. Hard-Iron 보정 (이후 과정은 기존과 동일)
+    # 3. Hard-Iron 보정
     for col in ['Mag_X', 'Mag_Y', 'Mag_Z']:
         feature_df[col] -= models["hard_iron"][col]
 
@@ -79,23 +80,25 @@ def run_prediction(data: schemas.SensorInput) -> Tuple[int, list, list]:
     feature_df[['Mag_X', 'Mag_Y', 'Mag_Z']] = np.dot(mag_data, models["soft_iron"].T)
     
     # 5. Zero-Centering
-    for col in initial_feature_cols:
+    for col in FEATURE_COLS:
         feature_df[col] -= models["zero_center"][col]
     
-    # 6. 파이프라인을 사용한 예측
-    pipeline = models["pipeline"]
-    final_features_df = feature_df[FEATURE_COLS]
-    prediction_index = pipeline.predict(final_features_df)[0]
+    # (추가 ✨) 6. 데이터 스케일링을 수동으로 다시 수행
+    scaled_features = models["scaler"].transform(feature_df)
+    
+    # 7. MLP 모델로 예측 수행
+    mlp_model = models["mlp"]
+    prediction_index = mlp_model.predict(scaled_features)[0]
     
     # 최종 예측 결과에서 접미사 제거
     raw_prediction = models["label_encoder"].inverse_transform([prediction_index])[0]
     final_prediction = extract_location_id(raw_prediction)
 
-    # 7. 신뢰도 및 Top-3 계산
+    # 8. 신뢰도 및 Top-3 계산
     top_results_for_logging, top_results_for_response = [], []
     
-    if hasattr(pipeline, "predict_proba"):
-        probabilities = pipeline.predict_proba(final_features_df)[0]
+    if hasattr(mlp_model, "predict_proba"):
+        probabilities = mlp_model.predict_proba(scaled_features)[0]
         num_candidates = min(len(probabilities), 15)
         top_indices = np.argsort(-probabilities)[:num_candidates]
         raw_top_labels = models["label_encoder"].inverse_transform(top_indices)
