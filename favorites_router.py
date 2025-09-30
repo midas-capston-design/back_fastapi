@@ -1,103 +1,177 @@
 # -*- coding: utf-8 -*-
-"""
-즐겨찾기(Favorite) 관련 API 라우터
+# 이 파일은 머신러닝 모델 로딩 및 예측 로직을 전담합니다.
 
-이 파일은 즐겨찾기 기능과 관련된 API 엔드포인트를 정의합니다.
-- POST /: 새 즐겨찾기 추가
-- GET /: 내 즐겨찾기 목록 조회
-- DELETE /{favorite_id}: 특정 즐겨찾기 삭제
+import os
+import joblib
+import numpy as np
+import pandas as pd
+from typing import Tuple
+from collections import deque
+import pywt  # 🔧 웨이브렛
 
-이 라우터의 모든 엔드포인트는 사용자 인증을 필요로 합니다.
-"""
-
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.orm import Session
-from typing import List
-
-# --- 프로젝트 내부 모듈 Import ---
-import crud
+# app.py가 아닌 여기서 직접 schemas를 import합니다.
 import schemas
-import auth
-from database import get_db
 
-# "/favorites" 경로에 대한 API 작업을 그룹화하는 APIRouter 객체를 생성합니다.
-router = APIRouter()
+# --- 모델/전처리기 파일을 모두 로드 ---
+base_dir = os.path.dirname(__file__)
+model_dir = os.path.join(base_dir, "model")
 
+# 🔧 zero_center 제거 (더 이상 사용/로드하지 않음)
+MODEL_PATHS = {
+    "mlp": os.path.join(model_dir, "mlp_model_6input.pkl"),
+    "scaler": os.path.join(model_dir, "scaler.pkl"),
+    "label_encoder": os.path.join(model_dir, "label_encoder_6input.pkl"),
+    "soft_iron": os.path.join(model_dir, "soft_iron_matrix.pkl"),
+    "hard_iron": os.path.join(model_dir, "bias.pkl"),
+}
 
-@router.post(
-    "/",
-    response_model=schemas.FavoriteResponse,
-    status_code=status.HTTP_201_CREATED,
-    summary="새 즐겨찾기 추가 (인증 필요)"
-)
-def create_favorite_for_user(
-    favorite: schemas.FavoriteCreate,
-    db: Session = Depends(get_db),
-    # `Depends(auth.get_current_active_user)`를 통해 이 엔드포인트가
-    # 반드시 인증된 사용자의 요청에만 응답하도록 강제합니다.
-    current_user: schemas.User = Depends(auth.get_current_active_user)
-):
+models = {}
+MODEL_LOADED = False
+FEATURE_COLS = None
+
+try:
+    for name, path in MODEL_PATHS.items():
+        models[name] = joblib.load(path)
+        print(f"✅ 모델 컴포넌트 로드 완료: {os.path.basename(path)}")
+
+    MODEL_LOADED = True
+    FEATURE_COLS = ['Mag_X', 'Mag_Y', 'Mag_Z', 'Ori_X', 'Ori_Y', 'Ori_Z']
+    print("🚀 모든 모델 컴포넌트(6-input)가 성공적으로 로드되었습니다.")
+except (FileNotFoundError, KeyError) as e:
+    print(f"❌ 모델 로드 실패: {e}")
+
+# 🔧 웨이브렛 설정 & 버퍼
+WAVELET_NAME = 'db4'
+WAVELET_LEVEL = 3
+WAVELET_MODE = 'soft'
+BUFFER_SIZE = 64  # df 단위가 아니라 스트림 단위에서 최근 샘플을 모아 적용
+
+# 자기장 3축에 대한 순환 버퍼 (실시간 단샘플 입력 대응)
+_mag_buffers = {
+    'Mag_X': deque(maxlen=BUFFER_SIZE),
+    'Mag_Y': deque(maxlen=BUFFER_SIZE),
+    'Mag_Z': deque(maxlen=BUFFER_SIZE),
+}
+
+def _wavelet_denoise_1d(arr: np.ndarray,
+                        wavelet: str = WAVELET_NAME,
+                        level: int = WAVELET_LEVEL,
+                        mode: str = WAVELET_MODE) -> np.ndarray:
     """
-    현재 로그인된 사용자의 새 즐겨찾기를 추가합니다.
-
-    - **인증**: `Authorization: Bearer {토큰}` 헤더가 필요합니다.
-    - **요청**: `schemas.FavoriteCreate` 형식의 즐겨찾기 정보.
-    - **응답**: 생성된 즐겨찾기 정보 (`schemas.FavoriteResponse` 형식).
-    - **에러**: 즐겨찾기 `id`가 이미 존재하면 409 (Conflict) 에러를 반환합니다.
+    Donoho universal threshold 기반 1D 웨이브렛 디노이즈.
+    입력: 1D ndarray
+    출력: 1D ndarray (동일 길이)
     """
-    # 실제 DB 생성 작업은 crud.py의 함수에 위임합니다.
-    # 이때, 현재 로그인된 사용자의 id(current_user.id)를 함께 넘겨주어
-    # 해당 즐겨찾기의 소유자를 명확히 합니다.
-    return crud.create_user_favorite(db=db, favorite=favorite, user_id=current_user.id)
+    if arr.size < 8:  # 길이가 너무 짧으면 웨이브렛 의미가 적으므로 원신호 반환
+        return arr
 
+    coeffs = pywt.wavedec(arr, wavelet=wavelet, level=level)
+    # 노이즈 표준편차 추정 (최상위 detail 계수의 MAD)
+    if len(coeffs[-1]) == 0:
+        return arr
+    sigma = np.median(np.abs(coeffs[-1])) / 0.6745
+    if sigma == 0.0:
+        return arr
 
-@router.get(
-    "/",
-    response_model=List[schemas.FavoriteResponse],
-    summary="내 즐겨찾기 목록 조회 (인증 필요)"
-)
-def read_favorites(
-    skip: int = 0,
-    limit: int = 100,
-    db: Session = Depends(get_db),
-    current_user: schemas.User = Depends(auth.get_current_active_user)
-):
+    uthresh = sigma * np.sqrt(2 * np.log(len(arr)))
+    denoised_coeffs = [coeffs[0]] + [
+        pywt.threshold(c, value=uthresh, mode=mode) for c in coeffs[1:]
+    ]
+    recon = pywt.waverec(denoised_coeffs, wavelet=wavelet)
+    return recon[:len(arr)]
+
+# --- 외부(app.py)에서 사용할 함수들 ---
+
+def get_model_status() -> dict:
+    """모델의 로드 상태와 정보를 반환합니다."""
+    return {
+        "status": "ok" if MODEL_LOADED else "error",
+        "model_loaded": MODEL_LOADED,
+        "model_name": "MLP 6-input (Hard/Soft-Iron + Wavelet + Scaler)",  # 🔧 설명 업데이트
+        "feature_cols": FEATURE_COLS if MODEL_LOADED else None,
+        "preprocess": {
+            "hard_iron": True,
+            "soft_iron": True,
+            "wavelet": {"name": WAVELET_NAME, "level": WAVELET_LEVEL, "mode": WAVELET_MODE},
+            "zero_centering": False,  # 🔧 제거
+            "scaler": True,
+        }
+    }
+
+def extract_location_id(label_str):
+    """라벨에서 위치 ID만 추출하는 함수 (기존과 동일)"""
+    try:
+        return int(str(label_str).split('_')[0])
+    except (ValueError, IndexError):
+        try:
+            return int(label_str)
+        except:
+            return 0
+
+def run_prediction(data: schemas.SensorInput) -> Tuple[int, list, list]:
     """
-    현재 로그인된 사용자의 모든 즐겨찾기 목록을 반환합니다. (페이지네이션 지원)
-
-    - **인증**: `Authorization: Bearer {토큰}` 헤더가 필요합니다.
-    - **쿼리 파라미터**: `skip`(건너뛸 개수), `limit`(최대 개수)를 통해 페이지네이션이 가능합니다.
-    - **응답**: 즐겨찾기 정보의 리스트 (`List[schemas.FavoriteResponse]` 형식).
+    6-input 모델에 맞게 수동 전처리 및 예측 수행.
+    전처리 순서: Hard-Iron → Soft-Iron → 🔧 Wavelet → Scaler → MLP
     """
-    # crud.py의 함수를 호출하여 현재 사용자의 즐겨찾기 목록을 조회합니다.
-    favorites = crud.get_favorites_by_user(db, user_id=current_user.id, skip=skip, limit=limit)
-    return favorites
+    if not MODEL_LOADED:
+        raise RuntimeError("Model components are not loaded properly.")
 
+    # 1) 입력 → DataFrame
+    feature_df = pd.DataFrame([data.model_dump()], columns=FEATURE_COLS)
 
-@router.delete(
-    "/{favorite_id}",
-    response_model=schemas.FavoriteResponse,
-    summary="즐겨찾기 삭제 (인증 필요)"
-)
-def delete_favorite(
-    favorite_id: str,
-    db: Session = Depends(get_db),
-    current_user: schemas.User = Depends(auth.get_current_active_user)
-):
-    """
-    ID에 해당하는 즐겨찾기를 삭제합니다.
-    본인의 즐겨찾기만 삭제할 수 있습니다.
+    # 2) Hard-Iron 보정
+    for col in ['Mag_X', 'Mag_Y', 'Mag_Z']:
+        feature_df[col] = feature_df[col].astype(float) - float(models["hard_iron"][col])
 
-    - **인증**: `Authorization: Bearer {토큰}` 헤더가 필요합니다.
-    - **경로 파라미터**: `favorite_id` (삭제할 즐겨찾기의 고유 ID).
-    - **응답**: 삭제된 즐겨찾기 정보.
-    - **에러**: 즐겨찾기가 없거나, 본인의 것이 아닐 경우 404 (Not Found) 에러를 반환합니다.
-    """
-    # crud.py의 함수를 호출하여 DB에서 즐겨찾기를 삭제합니다.
-    # 이때, 사용자 ID를 함께 넘겨주어 다른 사람의 즐겨찾기를 삭제하지 못하도록 합니다.
-    db_favorite = crud.delete_favorite(db=db, favorite_id=favorite_id, user_id=current_user.id)
-    if db_favorite is None:
-        raise HTTPException(status_code=404, detail="해당 ID의 즐겨찾기를 찾을 수 없거나 삭제 권한이 없습니다.")
-    
-    return db_favorite
+    # 3) Soft-Iron 보정
+    mag_data = feature_df[['Mag_X', 'Mag_Y', 'Mag_Z']].values  # shape (1,3)
+    feature_df[['Mag_X', 'Mag_Y', 'Mag_Z']] = np.dot(mag_data, models["soft_iron"].T)
 
+    # 4) 🔧 Wavelet Denoising (소프트아이언 뒤, 스케일러 전에)
+    #    실시간 단샘플 예측 호환을 위해, 축별 버퍼에 누적 → 버퍼 전체를 디노이즈 → 마지막 값을 사용
+    for col in ['Mag_X', 'Mag_Y', 'Mag_Z']:
+        _mag_buffers[col].append(float(feature_df[col].iloc[0]))
+        buf_arr = np.asarray(_mag_buffers[col], dtype=float)
+        denoised = _wavelet_denoise_1d(buf_arr)
+        denoised_last = denoised[-1] if denoised.size > 0 else float(feature_df[col].iloc[0])
+        feature_df.at[0, col] = denoised_last
+
+    # 🔧 (삭제) Zero-Centering 단계 완전 제거
+
+    # 5) Scaler
+    scaled_features = models["scaler"].transform(feature_df)
+
+    # 6) MLP 예측
+    mlp_model = models["mlp"]
+    prediction_index = mlp_model.predict(scaled_features)[0]
+
+    # 라벨 복원 및 위치 ID 추출
+    raw_prediction = models["label_encoder"].inverse_transform([prediction_index])[0]
+    final_prediction = extract_location_id(raw_prediction)
+
+    # 7) 신뢰도 / Top-3 유니크 후보
+    top_results_for_logging, top_results_for_response = [], []
+    if hasattr(mlp_model, "predict_proba"):
+        probabilities = mlp_model.predict_proba(scaled_features)[0]
+        num_candidates = min(len(probabilities), 15)
+        top_indices = np.argsort(-probabilities)[:num_candidates]
+        raw_top_labels = models["label_encoder"].inverse_transform(top_indices)
+        top_probs = probabilities[top_indices]
+
+        seen_locations = set()
+        unique_results = []
+        for raw_label, prob in zip(raw_top_labels, top_probs):
+            location_id = extract_location_id(raw_label)
+            if location_id not in seen_locations:
+                seen_locations.add(location_id)
+                unique_results.append((location_id, float(prob)))
+                if len(unique_results) >= 3:
+                    break
+
+        while len(unique_results) < 3:
+            unique_results.append((0, 0.0))
+
+        top_results_for_logging = unique_results[:3]
+        top_results_for_response = unique_results[:3]
+
+    return final_prediction, top_results_for_logging, top_results_for_response
