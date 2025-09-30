@@ -6,8 +6,7 @@ import joblib
 import numpy as np
 import pandas as pd
 from typing import Tuple
-from collections import deque
-import pywt  # 🔧 웨이브렛
+import pywt  # ✅ 웨이브렛 사용
 
 # app.py가 아닌 여기서 직접 schemas를 import합니다.
 import schemas
@@ -16,10 +15,10 @@ import schemas
 base_dir = os.path.dirname(__file__)
 model_dir = os.path.join(base_dir, "model")
 
-# 🔧 zero_center 제거 (더 이상 사용/로드하지 않음)
+# ✅ zero_center 제거(로드/사용 X)
 MODEL_PATHS = {
     "mlp": os.path.join(model_dir, "mlp_model_6input.pkl"),
-    "scaler": os.path.join(model_dir, "scaler.pkl"),
+    "scaler": os.path.join(model_dir, "scaler.pkl"),  # Scaler를 별도로 로드
     "label_encoder": os.path.join(model_dir, "label_encoder_6input.pkl"),
     "soft_iron": os.path.join(model_dir, "soft_iron_matrix.pkl"),
     "hard_iron": os.path.join(model_dir, "bias.pkl"),
@@ -28,57 +27,16 @@ MODEL_PATHS = {
 models = {}
 MODEL_LOADED = False
 FEATURE_COLS = None
-
 try:
     for name, path in MODEL_PATHS.items():
         models[name] = joblib.load(path)
         print(f"✅ 모델 컴포넌트 로드 완료: {os.path.basename(path)}")
-
     MODEL_LOADED = True
+    # (유지) 특징 컬럼: 6-input
     FEATURE_COLS = ['Mag_X', 'Mag_Y', 'Mag_Z', 'Ori_X', 'Ori_Y', 'Ori_Z']
     print("🚀 모든 모델 컴포넌트(6-input)가 성공적으로 로드되었습니다.")
 except (FileNotFoundError, KeyError) as e:
     print(f"❌ 모델 로드 실패: {e}")
-
-# 🔧 웨이브렛 설정 & 버퍼
-WAVELET_NAME = 'db4'
-WAVELET_LEVEL = 3
-WAVELET_MODE = 'soft'
-BUFFER_SIZE = 64  # df 단위가 아니라 스트림 단위에서 최근 샘플을 모아 적용
-
-# 자기장 3축에 대한 순환 버퍼 (실시간 단샘플 입력 대응)
-_mag_buffers = {
-    'Mag_X': deque(maxlen=BUFFER_SIZE),
-    'Mag_Y': deque(maxlen=BUFFER_SIZE),
-    'Mag_Z': deque(maxlen=BUFFER_SIZE),
-}
-
-def _wavelet_denoise_1d(arr: np.ndarray,
-                        wavelet: str = WAVELET_NAME,
-                        level: int = WAVELET_LEVEL,
-                        mode: str = WAVELET_MODE) -> np.ndarray:
-    """
-    Donoho universal threshold 기반 1D 웨이브렛 디노이즈.
-    입력: 1D ndarray
-    출력: 1D ndarray (동일 길이)
-    """
-    if arr.size < 8:  # 길이가 너무 짧으면 웨이브렛 의미가 적으므로 원신호 반환
-        return arr
-
-    coeffs = pywt.wavedec(arr, wavelet=wavelet, level=level)
-    # 노이즈 표준편차 추정 (최상위 detail 계수의 MAD)
-    if len(coeffs[-1]) == 0:
-        return arr
-    sigma = np.median(np.abs(coeffs[-1])) / 0.6745
-    if sigma == 0.0:
-        return arr
-
-    uthresh = sigma * np.sqrt(2 * np.log(len(arr)))
-    denoised_coeffs = [coeffs[0]] + [
-        pywt.threshold(c, value=uthresh, mode=mode) for c in coeffs[1:]
-    ]
-    recon = pywt.waverec(denoised_coeffs, wavelet=wavelet)
-    return recon[:len(arr)]
 
 # --- 외부(app.py)에서 사용할 함수들 ---
 
@@ -87,15 +45,8 @@ def get_model_status() -> dict:
     return {
         "status": "ok" if MODEL_LOADED else "error",
         "model_loaded": MODEL_LOADED,
-        "model_name": "MLP 6-input (Hard/Soft-Iron + Wavelet + Scaler)",  # 🔧 설명 업데이트
+        "model_name": "MLP 6-input (Hard/Soft-Iron + Wavelet + Scaler)",  # 이름 갱신
         "feature_cols": FEATURE_COLS if MODEL_LOADED else None,
-        "preprocess": {
-            "hard_iron": True,
-            "soft_iron": True,
-            "wavelet": {"name": WAVELET_NAME, "level": WAVELET_LEVEL, "mode": WAVELET_MODE},
-            "zero_centering": False,  # 🔧 제거
-            "scaler": True,
-        }
     }
 
 def extract_location_id(label_str):
@@ -110,47 +61,75 @@ def extract_location_id(label_str):
 
 def run_prediction(data: schemas.SensorInput) -> Tuple[int, list, list]:
     """
-    6-input 모델에 맞게 수동 전처리 및 예측 수행.
-    전처리 순서: Hard-Iron → Soft-Iron → 🔧 Wavelet → Scaler → MLP
+    6-input 모델에 맞게 수동 전처리 및 예측을 수행합니다.
+    순서: Hard-Iron → Soft-Iron → Wavelet(요청과 100% 동일 구현) → Scaler → MLP
     """
     if not MODEL_LOADED:
         raise RuntimeError("Model components are not loaded properly.")
 
-    # 1) 입력 → DataFrame
+    # 1. 입력 데이터를 Pandas DataFrame으로 변환
     feature_df = pd.DataFrame([data.model_dump()], columns=FEATURE_COLS)
 
-    # 2) Hard-Iron 보정
+    # (삭제) 자기장 크기(Mag_abs) 계산 로직 제거
+
+    # 3. Hard-Iron 보정
     for col in ['Mag_X', 'Mag_Y', 'Mag_Z']:
         feature_df[col] = feature_df[col].astype(float) - float(models["hard_iron"][col])
 
-    # 3) Soft-Iron 보정
-    mag_data = feature_df[['Mag_X', 'Mag_Y', 'Mag_Z']].values  # shape (1,3)
+    # 4. Soft-Iron 보정
+    mag_data = feature_df[['Mag_X', 'Mag_Y', 'Mag_Z']].values
     feature_df[['Mag_X', 'Mag_Y', 'Mag_Z']] = np.dot(mag_data, models["soft_iron"].T)
 
-    # 4) 🔧 Wavelet Denoising (소프트아이언 뒤, 스케일러 전에)
-    #    실시간 단샘플 예측 호환을 위해, 축별 버퍼에 누적 → 버퍼 전체를 디노이즈 → 마지막 값을 사용
-    for col in ['Mag_X', 'Mag_Y', 'Mag_Z']:
-        _mag_buffers[col].append(float(feature_df[col].iloc[0]))
-        buf_arr = np.asarray(_mag_buffers[col], dtype=float)
-        denoised = _wavelet_denoise_1d(buf_arr)
-        denoised_last = denoised[-1] if denoised.size > 0 else float(feature_df[col].iloc[0])
-        feature_df.at[0, col] = denoised_last
+    # ================================
+    # ✅ 웨이브렛 Denoising (요청문과 100% 동일)
+    # ================================
+    # 호출부까지 동일하게 맞추기 위해 alias와 리스트명을 동일하게 만듭니다.
+    df = feature_df
+    mag_cols = ['Mag_X', 'Mag_Y', 'Mag_Z']
 
-    # 🔧 (삭제) Zero-Centering 단계 완전 제거
+    # -------------------------------
+    # 4️⃣ 웨이브렛 Denoising (Magnetometer)
+    #    db4, level=3, soft-threshold(Donoho universal)
+    # -------------------------------
+    def wavelet_denoise(signal, wavelet='db4', level=3, mode='soft'):
+        # DWT
+        coeffs = pywt.wavedec(signal, wavelet=wavelet, level=level)
+        # 노이즈 표준편차 추정 (최상위 detail 계수의 median absolute deviation)
+        sigma = np.median(np.abs(coeffs[-1])) / 0.6745 if len(coeffs[-1]) > 0 else 0.0
+        if sigma == 0.0:
+            return signal  # 노이즈 추정 불가 시 원신호 반환
+        uthresh = sigma * np.sqrt(2 * np.log(len(signal)))
+        # Approximation(A) 제외, Detail(D) 계수만 임계값 적용
+        denoised_coeffs = [coeffs[0]] + [
+            pywt.threshold(c, value=uthresh, mode=mode) for c in coeffs[1:]
+        ]
+        recon = pywt.waverec(denoised_coeffs, wavelet=wavelet)
+        # 길이 보정 (경계 처리로 길이가 1~2 샘플 달라질 수 있음)
+        return recon[:len(signal)]
 
-    # 5) Scaler
+    for col in mag_cols:
+        df[col] = wavelet_denoise(df[col].values, wavelet='db4', level=3, mode='soft')
+    print("✅ Wavelet Denoising 완료")
+    # ================================
+
+    # (완전 제거) Zero-Centering 단계
+    # for col in FEATURE_COLS:
+    #     feature_df[col] -= models["zero_center"][col]
+
+    # 6. 데이터 스케일링
     scaled_features = models["scaler"].transform(feature_df)
 
-    # 6) MLP 예측
+    # 7. MLP 모델로 예측 수행
     mlp_model = models["mlp"]
     prediction_index = mlp_model.predict(scaled_features)[0]
 
-    # 라벨 복원 및 위치 ID 추출
+    # 최종 예측 결과에서 접미사 제거
     raw_prediction = models["label_encoder"].inverse_transform([prediction_index])[0]
     final_prediction = extract_location_id(raw_prediction)
 
-    # 7) 신뢰도 / Top-3 유니크 후보
+    # 8. 신뢰도 및 Top-3 계산
     top_results_for_logging, top_results_for_response = [], []
+
     if hasattr(mlp_model, "predict_proba"):
         probabilities = mlp_model.predict_proba(scaled_features)[0]
         num_candidates = min(len(probabilities), 15)
@@ -160,6 +139,7 @@ def run_prediction(data: schemas.SensorInput) -> Tuple[int, list, list]:
 
         seen_locations = set()
         unique_results = []
+
         for raw_label, prob in zip(raw_top_labels, top_probs):
             location_id = extract_location_id(raw_label)
             if location_id not in seen_locations:
