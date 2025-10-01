@@ -17,7 +17,7 @@ from typing import List
 # --- 프로젝트 내부 모듈 Import ---
 import crud
 import schemas
-import auth
+import core.auth as auth
 from database import get_db
 
 # "/favorites" 경로에 대한 API 작업을 그룹화하는 APIRouter 객체를 생성합니다.
