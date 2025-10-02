@@ -7,14 +7,14 @@ import numpy as np
 from typing import Tuple, Optional, Dict, Any
 import pywt
 from collections import deque
-
-import schemas  # app.py가 아닌 여기서 직접 import
+import schemas
 
 # -------------------------------
-# 경로 및 파일
+# 경로 및 파일 (수정 완료)
 # -------------------------------
-BASE_DIR = os.path.dirname(__file__)
-MODEL_DIR = os.path.join(BASE_DIR, "model")
+# 현재 파일의 위치를 기준으로 프로젝트 루트 폴더를 찾아서 모델 경로를 설정합니다.
+project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+MODEL_DIR = os.path.join(project_root, "model")
 
 MODEL_PATHS = {
     "mlp": os.path.join(MODEL_DIR, "mlp_model_6input.pkl"),
@@ -23,11 +23,11 @@ MODEL_PATHS = {
     "soft_iron": os.path.join(MODEL_DIR, "soft_iron_matrix.pkl"),
     "hard_iron": os.path.join(MODEL_DIR, "bias.pkl"),
     "preproc_params": os.path.join(MODEL_DIR, "preproc_params.pkl"),
-    "wavelet_sigma": os.path.join(MODEL_DIR, "wavelet_sigma.pkl"),  # fixed 전략 시
+    #"wavelet_sigma": os.path.join(MODEL_DIR, "wavelet_sigma.pkl"),
 }
 
 # -------------------------------
-# 기본 파라미터 (preproc_params 없을 때)
+# 기본 파라미터
 # -------------------------------
 DEFAULT_PARAMS = {
     "wavelet": "db4",
@@ -36,9 +36,9 @@ DEFAULT_PARAMS = {
     "window_size": 256,
     "hop_size": 1,
     "border_mode": "symmetric",
-    "strategy": "adaptive",        # 'adaptive' 또는 'fixed'
-    "warmup_policy": "pad",        # 'pad' | 'wait' | 'passthrough' | 'ratio'
-    "min_fill_ratio": 0.5,         # warmup_policy='ratio'에서 사용
+    "strategy": "adaptive",
+    "warmup_policy": "pad",
+    "min_fill_ratio": 0.5,
 }
 
 MAG_COLS = ["Mag_X", "Mag_Y", "Mag_Z"]
@@ -55,7 +55,6 @@ BUFFERS: Dict[str, deque] = {}
 MODEL_LOADED = False
 
 try:
-    # 필수/선택 모델 로드
     for k, p in MODEL_PATHS.items():
         if os.path.exists(p):
             models[k] = joblib.load(p)
@@ -66,29 +65,23 @@ try:
         missing = [k for k in required if k not in models]
         raise FileNotFoundError(f"필수 모델 파일 누락: {missing}")
 
-    # 전처리 파라미터
     if "preproc_params" in models:
         PREPROC_PARAMS.update(models["preproc_params"])
         print("✅ 전처리 파라미터 적용:", PREPROC_PARAMS)
     else:
         print("ℹ️ preproc_params.pkl 없음 → 기본 파라미터 사용:", PREPROC_PARAMS)
 
-    # fixed 전략이면 전역 임계 사용
     if PREPROC_PARAMS.get("strategy", "adaptive") == "fixed" and "wavelet_sigma" in models:
         FIXED_SIGMA = models["wavelet_sigma"]
-        print("✅ wavelet_sigma 적용(고정 임계):",
-              {k: {"uthresh": v.get("uthresh", None)} for k, v in FIXED_SIGMA.items()})
+        print("✅ wavelet_sigma 적용(고정 임계):", {k: v.get("uthresh") for k, v in FIXED_SIGMA.items()})
     else:
         print("ℹ️ adaptive 모드 또는 wavelet_sigma 미존재")
 
-    # 실시간 버퍼 준비
     BUFFERS = {c: deque(maxlen=int(PREPROC_PARAMS["window_size"])) for c in MAG_COLS}
-
     MODEL_LOADED = True
     print("🚀 모든 모델 컴포넌트(6-input) 로드 완료")
 except Exception as e:
     print(f"❌ 모델 로드 실패: {e}")
-
 
 # -------------------------------
 # 유틸
@@ -99,11 +92,10 @@ def get_model_status() -> dict:
         "model_loaded": MODEL_LOADED,
         "model_name": "MLP 6-input (Hard/Soft-Iron + Windowed Wavelet + Scaler)",
         "feature_cols": FEATURE_COLS if MODEL_LOADED else None,
-        "wavelet_strategy": PREPROC_PARAMS.get("strategy", None) if MODEL_LOADED else None,
-        "window_size": PREPROC_PARAMS.get("window_size", None) if MODEL_LOADED else None,
-        "warmup_policy": PREPROC_PARAMS.get("warmup_policy", None) if MODEL_LOADED else None,
+        "wavelet_strategy": PREPROC_PARAMS.get("strategy"),
+        "window_size": PREPROC_PARAMS.get("window_size"),
+        "warmup_policy": PREPROC_PARAMS.get("warmup_policy"),
     }
-
 
 def extract_location_id(label_str):
     try:
@@ -114,136 +106,86 @@ def extract_location_id(label_str):
         except Exception:
             return 0
 
-
 def _wavelet_denoise_window(x: np.ndarray, col_name: str) -> np.ndarray:
-    """
-    학습과 동일: db4/level/thresh_mode/border_mode.
-    strategy=='fixed'이면 저장된 uthresh 사용, 아니면 adaptive.
-    """
     wavelet = PREPROC_PARAMS["wavelet"]
     level = int(PREPROC_PARAMS["level"])
     mode = PREPROC_PARAMS["thresh_mode"]
     border = PREPROC_PARAMS["border_mode"]
-
     coeffs = pywt.wavedec(x, wavelet=wavelet, level=level, mode=border)
 
-    # uthresh 결정
     if PREPROC_PARAMS.get("strategy", "adaptive") == "fixed" and FIXED_SIGMA and FIXED_SIGMA.get(col_name):
         uthresh = float(FIXED_SIGMA[col_name].get("uthresh", 0.0))
-        if uthresh <= 0:
-            return x
+        if uthresh <= 0: return x
     else:
         d = coeffs[-1]
-        if len(d) == 0:
-            return x
+        if len(d) == 0: return x
         sigma = np.median(np.abs(d)) / 0.6745
-        if sigma == 0:
-            return x
+        if sigma == 0: return x
         uthresh = sigma * np.sqrt(2 * np.log(len(x)))
 
     den = [coeffs[0]] + [pywt.threshold(c, value=uthresh, mode=mode) for c in coeffs[1:]]
     y = pywt.waverec(den, wavelet=wavelet, mode=border)
     return y[:len(x)]
 
-
 def _latest_value_with_warmup(col_name: str) -> float:
-    """
-    버퍼(windows) 기반 웨이브렛 후 최신 1샘플 반환.
-    warmup 정책: pad | wait | passthrough | ratio
-    """
     window_size = int(PREPROC_PARAMS["window_size"])
     policy = PREPROC_PARAMS.get("warmup_policy", "pad")
     ratio = float(PREPROC_PARAMS.get("min_fill_ratio", 0.5))
-
     buf = np.array(BUFFERS[col_name], dtype=float)
     n = len(buf)
 
-    if policy == "wait" and n < window_size:
-        # 예측은 상위에서 None 처리, 여기선 원시 최신값 반환
+    if (policy == "wait" and n < window_size) or \
+       (policy == "passthrough" and n < window_size) or \
+       (policy == "ratio" and n < max(1, int(window_size * ratio))):
         return float(buf[-1]) if n > 0 else 0.0
 
-    if policy == "passthrough" and n < window_size:
-        return float(buf[-1]) if n > 0 else 0.0
-
-    if policy == "ratio" and n < max(1, int(window_size * ratio)):
-        return float(buf[-1]) if n > 0 else 0.0
-
-    # 웨이브렛 적용 (부족하면 edge 패딩)
     if n < window_size:
-        if n == 0:
-            x = np.zeros(window_size, dtype=float)
-        else:
-            x = np.pad(buf, (0, window_size - n), mode="edge")
+        x = np.pad(buf, (0, window_size - n), mode="edge") if n > 0 else np.zeros(window_size)
     else:
         x = buf[-window_size:]
 
     y = _wavelet_denoise_window(x, col_name)
     return float(y[-1])
 
-
 # -------------------------------
 # 예측 진입점
 # -------------------------------
 def run_prediction(data: schemas.SensorInput) -> Tuple[Optional[int], list, list]:
-    """
-    순서(학습과 동일): Hard-Iron → Soft-Iron → Windowed Wavelet → Scaler → MLP
-    warmup_policy == 'wait' 일 때 버퍼 미충분이면 (None, [], []) 반환
-    """
     if not MODEL_LOADED:
         raise RuntimeError("Model components are not loaded properly.")
 
-    # 1) 입력
-    sample = {
-        "Mag_X": float(getattr(data, "Mag_X")),
-        "Mag_Y": float(getattr(data, "Mag_Y")),
-        "Mag_Z": float(getattr(data, "Mag_Z")),
-        "Ori_X": float(getattr(data, "Ori_X")),
-        "Ori_Y": float(getattr(data, "Ori_Y")),
-        "Ori_Z": float(getattr(data, "Ori_Z")),
-    }
+    sample = data.model_dump()
 
-    # 2) Hard-Iron
     for c in MAG_COLS:
-        sample[c] = sample[c] - float(models["hard_iron"][c])
+        sample[c] -= float(models["hard_iron"][c])
 
-    # 3) Soft-Iron (선형)
-    mag_vec = np.array([sample["Mag_X"], sample["Mag_Y"], sample["Mag_Z"]], dtype=float)
+    mag_vec = np.array([sample[c] for c in MAG_COLS], dtype=float)
     mag_vec = models["soft_iron"] @ mag_vec
-    sample["Mag_X"], sample["Mag_Y"], sample["Mag_Z"] = mag_vec.tolist()
+    for i, c in enumerate(MAG_COLS):
+        sample[c] = mag_vec[i]
 
-    # 4) 버퍼 업데이트
     for c in MAG_COLS:
         BUFFERS[c].append(sample[c])
 
-    # 5) warmup 정책 확인
     window_size = int(PREPROC_PARAMS["window_size"])
     policy = PREPROC_PARAMS.get("warmup_policy", "pad")
     n_now = min(len(BUFFERS[c]) for c in MAG_COLS)
 
-    # 6) 웨이브렛(윈도우) → 최신 샘플
-    latest = {c: _latest_value_with_warmup(c) for c in MAG_COLS}
-
-    # wait 정책이면 버퍼 꽉 차기 전 예측 반환하지 않음
     if policy == "wait" and n_now < window_size:
         return None, [], []
 
-    # 7) 특징 벡터 (학습과 동일 순서)
-    feature_vec = np.array([
-        latest["Mag_X"], latest["Mag_Y"], latest["Mag_Z"],
-        sample["Ori_X"], sample["Ori_Y"], sample["Ori_Z"],
-    ]).reshape(1, -1)
-
-    # 8) 스케일러
+    latest = {c: _latest_value_with_warmup(c) for c in MAG_COLS}
+    
+    feature_vec = np.array([latest[c] for c in MAG_COLS] + [sample[c] for c in ORI_COLS]).reshape(1, -1)
+    
     scaled = models["scaler"].transform(feature_vec)
-
-    # 9) 예측
+    
     mlp = models["mlp"]
     pred_idx = mlp.predict(scaled)[0]
-
+    
     raw_pred = models["label_encoder"].inverse_transform([pred_idx])[0]
     final_pred = extract_location_id(raw_pred)
 
-    # 10) Top-3 (서로 다른 location_id 기준)
     top_results_for_logging, top_results_for_response = [], []
     if hasattr(mlp, "predict_proba"):
         proba = mlp.predict_proba(scaled)[0]
@@ -263,7 +205,7 @@ def run_prediction(data: schemas.SensorInput) -> Tuple[Optional[int], list, list
                     break
         while len(uniq) < 3:
             uniq.append((0, 0.0))
-
+        
         top_results_for_logging = uniq[:3]
         top_results_for_response = uniq[:3]
 
