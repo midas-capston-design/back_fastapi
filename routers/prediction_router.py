@@ -20,6 +20,18 @@ def predict(data: schemas.SensorInput):
 
     prediction_result, log_results, response_results = run_prediction(data)
     
+    if prediction_result is None:#웨이브렛 적용시 필요한 코드
+        # 서버는 아직 예측할 준비가 안됨 (Warmup 중)
+        # 클라이언트에게는 "아직 처리 중"이라는 의미로 202 Accepted 상태 코드를 보낼 수 있습니다.
+        response.status_code = status.HTTP_202_ACCEPTED
+        return schemas.ModelOutput(
+            prediction=-2, # -2는 '워밍업 중'을 의미하는 코드로 약속
+            confidence=0.0,
+            top_k_results=["Status: Model is warming up. Please wait.", "", ""]
+        )
+
+
+
     # 로깅 및 응답 구성 로직은 기존과 동일합니다.
     input_str = (
         f"Input: Mag({data.Mag_X:.2f}, {data.Mag_Y:.2f}, {data.Mag_Z:.2f}), "
