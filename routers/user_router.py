@@ -33,3 +33,16 @@ def login_for_access_token(
 @router.get("/me", response_model=schemas.User, summary="내 정보 확인 (인증 필요)")
 def read_users_me(current_user: schemas.User = Depends(auth.get_current_active_user)):
     return current_user
+
+@router.put("/me/username", response_model=schemas.User, summary="로그인한 본인의 이름 변경 (인증 필요)")
+def update_own_username(
+    user_update: schemas.UserNameUpdate, 
+    db: Session = Depends(get_db),
+    current_user: schemas.User = Depends(auth.get_current_active_user)
+):
+    """
+    현재 로그인된 사용자의 userName을 변경합니다.
+    (토큰 인증 필요)
+    """
+    return crud.update_user_name(db=db, user_id_str=current_user.userId, user_update=user_update)
+

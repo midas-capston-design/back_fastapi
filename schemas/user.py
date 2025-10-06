@@ -20,3 +20,8 @@ class Token(BaseModel):
 
 class TokenData(BaseModel):
     userId: Optional[str] = None
+
+# --- 추가된 부분 ---
+# 사용자 이름 변경을 위한 요청 스키마
+class UserNameUpdate(BaseModel):
+    userName: str
