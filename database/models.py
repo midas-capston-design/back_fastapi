@@ -10,6 +10,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from .base import Base  # base.py에서 정의한 Base를 가져옵니다.
+from sqlalchemy import Boolean, Double
 
 # --- Enum 타입 정의 ---
 class FavoriteTypeEnum(enum.Enum):
@@ -51,3 +52,19 @@ class PredictedLocation(Base):
     description = Column(Text, nullable=True)
     floor = Column(Integer, nullable=False, default=3)
     address = Column(String(255), nullable=False, default="영남대학교 IT관")
+
+class OutdoorPlace(Base):
+    __tablename__ = "outdoor_place"
+
+    place_id = Column(String(50), primary_key=True)
+    name = Column(String(200), nullable=False)
+    category = Column(String(100))
+    address = Column(String(255))
+    lon = Column(Double, nullable=False)
+    lat = Column(Double, nullable=False)
+    has_facility = Column(Boolean, default=False)
+    facility_name = Column(String(150))
+    facility_type = Column(String(100))
+    facility_location = Column(String(255))
+    is_accessible = Column(Boolean, default=False)
+
