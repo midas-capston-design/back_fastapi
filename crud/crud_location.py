@@ -3,7 +3,7 @@ from typing import List
 from database import PredictedLocation
 from schemas import PredictedLocationCreate, PredictedLocationUpdate
 
-def get_predicted_location(db: Session, location_id: int) -> PredictedLocation:
+def get_predicted_location(db: Session, location_id: str) -> PredictedLocation:
     return db.query(PredictedLocation).filter(PredictedLocation.id == location_id).first()
 
 def get_all_predicted_locations(db: Session, skip: int = 0, limit: int = 100) -> List[PredictedLocation]:
@@ -16,7 +16,7 @@ def create_predicted_location(db: Session, location: PredictedLocationCreate) ->
     db.refresh(db_location)
     return db_location
 
-def update_predicted_location(db: Session, location_id: int, location_update: PredictedLocationUpdate) -> PredictedLocation:
+def update_predicted_location(db: Session, location_id: str, location_update: PredictedLocationUpdate) -> PredictedLocation:
     db_location = db.query(PredictedLocation).filter(PredictedLocation.id == location_id).first()
     if not db_location:
         return None
@@ -27,7 +27,7 @@ def update_predicted_location(db: Session, location_id: int, location_update: Pr
     db.refresh(db_location)
     return db_location
 
-def delete_predicted_location(db: Session, location_id: int) -> PredictedLocation:
+def delete_predicted_location(db: Session, location_id: str) -> PredictedLocation:
     db_location = db.query(PredictedLocation).filter(PredictedLocation.id == location_id).first()
     if db_location:
         db.delete(db_location)

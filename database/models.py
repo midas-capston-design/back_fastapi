@@ -47,7 +47,7 @@ class Favorite(Base):
 
 class PredictedLocation(Base):
     __tablename__ = "predicted_locations"
-    id = Column(Integer, primary_key=True)
+    id = Column(String(50), primary_key=True)
     location_name = Column(String(255), nullable=True, unique=True)
     description = Column(Text, nullable=True)
     floor = Column(Integer, nullable=False, default=3)
