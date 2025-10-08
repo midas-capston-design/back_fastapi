@@ -45,7 +45,7 @@ def get_all_locations(skip: int = 0, limit: int = 100, db: Session = Depends(get
     response_model=schemas.PredictedLocation,
     summary="특정 예측 위치 조회"
 )
-def get_location_by_id(location_id: int, db: Session = Depends(get_db)):
+def get_location_by_id(location_id: str, db: Session = Depends(get_db)):
     """
     경로 파라미터로 받은 `location_id`에 해당하는 특정 예측 위치 정보를 조회합니다.
     (예: 지도에서 특정 마커를 클릭했을 때 해당 지점의 상세 정보 요청)

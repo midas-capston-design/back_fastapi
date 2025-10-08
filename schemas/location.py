@@ -8,10 +8,10 @@ class PredictedLocationBase(BaseModel):
     address: str
 
 class PredictedLocationCreate(PredictedLocationBase):
-    id: int
+    id: str
 
 class PredictedLocation(PredictedLocationBase):
-    id: int
+    id: str
     model_config = ConfigDict(from_attributes=True)
 
 class PredictedLocationUpdate(BaseModel):
