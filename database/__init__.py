@@ -7,5 +7,6 @@ from .models import (
     Favorite, 
     PredictedLocation, 
     FavoriteTypeEnum, 
-    PlaceCategoryEnum
+    PlaceCategoryEnum,
+    OutdoorPlace
 )

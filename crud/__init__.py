@@ -10,3 +10,4 @@ from .crud_location import (
     update_predicted_location,
     delete_predicted_location,
 )
+from .crud_outdoor_place import get_place, get_places, create_place, update_place, delete_place

@@ -5,3 +5,4 @@ from .user import User, UserCreate, Token, TokenData, UserNameUpdate
 from .favorite import FavoriteCreate, FavoriteResponse, PlaceCategory, FavoriteType
 from .location import PredictedLocation, PredictedLocationCreate, PredictedLocationUpdate
 from .prediction import ModelOutput, SensorInput
+from .outdoor_place import OutdoorPlace, OutdoorPlaceCreate, OutdoorPlaceUpdate
