@@ -31,9 +31,9 @@ MODEL_PATHS = {
 # -------------------------------
 DEFAULT_PARAMS = {
     "wavelet": "db4",
-    "level": 3,
+    "level": 1,
     "thresh_mode": "soft",
-    "window_size": 256,
+    "window_size": 16,
     "hop_size": 1,
     "border_mode": "symmetric",
     "strategy": "adaptive",
