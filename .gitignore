@@ -1,39 +1,12 @@
-# === Python Cache / Bytecode ===
+# Environments - 가상 환경 폴더 (필수!)
+venv/
+.venv/
+env/
+ENV/
+
+# Byte-compiled / optimized files - 파이썬 캐시 (필수!)
 __pycache__/
 *.py[cod]
-*$py.class
-ㅣ
-# === Virtual Environment ===
-venv/
-ENV/
-env/
 
-# === Model artifacts (학습 결과물) ===
-
-# === Logs & Debug ===
-*.log
-
-# === IDE / Editor settings ===
-.vscode/
-.idea/
-*.swp
-
-# === OS-specific files ===
-.DS_Store
-Thumbs.db
-
-# === Environment variables & Secrets ===
-*.env
-.env.*
-*.pem
-
-# === Test / Coverage ===
-.pytest_cache/
-.coverage
-htmlcov/
-
-# === Build / Packaging ===
-*.egg-info/
-*.egg
-dist/
-build/
+# Environment variables - 민감 정보 파일 (필수!)
+.env
