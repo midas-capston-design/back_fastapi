@@ -3,6 +3,7 @@
 데이터베이스 연결 및 세션 관리를 위한 핵심 설정 파일
 - SQLAlchemy 엔진, 세션, Base 모델을 정의합니다.
 - .env 파일에서 데이터베이스 접속 정보를 로드합니다.
+.env 파일은 깃허브에 올리지 않기
 """
 
 from sqlalchemy import create_engine
